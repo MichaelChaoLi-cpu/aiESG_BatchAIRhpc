@@ -19,11 +19,13 @@ Usage:
     python src/embed_reports.py --overwrite   # re-embed even if outputs exist
 """
 
+import csv
 import os
 import re
 import sys
 import argparse
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from joblib import dump
@@ -271,6 +273,95 @@ def embed_folder(folder: Path, repo_root: Path, batch_size: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Status CSV
+# ---------------------------------------------------------------------------
+
+def parse_folder_name(folder_name: str) -> Optional[dict]:
+    """
+    Parse a folder name of the form {ticker}-{report_type}-{language}-{year}.
+    Returns a dict with keys ticker, report_type, language, year,
+    or None if the name does not match the expected pattern.
+    """
+    parts = folder_name.split("-")
+    if len(parts) != 4:
+        return None
+    ticker, report_type, language, year = parts
+    return {
+        "ticker":      ticker,
+        "report_type": report_type,
+        "language":    language,
+        "year":        year,
+    }
+
+
+def update_status_csv(processed_root: Path) -> None:
+    """
+    Create data/processed/processing_status.csv if it does not exist,
+    or append new rows (folders not already recorded) if it does.
+
+    Columns:
+        folder_name     — folder name
+        ticker          — ticker
+        report_type     — report type
+        language        — language
+        year            — year
+        md_done         — True if a .md file exists in the folder
+        TokenId         — True if TokenId.joblib exists
+        IndexedFragment — True if IndexedFragment.npy exists
+    """
+    csv_path = processed_root / "processing_status.csv"
+    fieldnames = [
+        "folder_name", "ticker", "report_type", "language", "year",
+        "md_done", "TokenId", "IndexedFragment",
+    ]
+
+    # Load already-recorded folder names so we never write duplicates
+    file_exists = csv_path.exists()
+    existing_folders = set()  # type: set
+    if file_exists:
+        with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                existing_folders.add(row["folder_name"])
+
+    new_rows = []
+    for folder in sorted(processed_root.iterdir()):
+        if not folder.is_dir():
+            continue
+        parsed = parse_folder_name(folder.name)
+        if parsed is None:
+            continue
+        if folder.name in existing_folders:
+            continue  # already recorded — skip
+        new_rows.append({
+            "folder_name":     folder.name,
+            "ticker":          parsed["ticker"],
+            "report_type":     parsed["report_type"],
+            "language":        parsed["language"],
+            "year":            parsed["year"],
+            "md_done":         any(folder.glob("*.md")),
+            "TokenId":         (folder / "TokenId.joblib").exists(),
+            "IndexedFragment": (folder / "IndexedFragment.npy").exists(),
+        })
+
+    if not file_exists:
+        # Create new file with BOM so Excel handles Chinese columns correctly
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(new_rows)
+        print(f"Status CSV created: {csv_path}  ({len(new_rows)} record(s))")
+    else:
+        # Append new rows without re-writing the header
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writerows(new_rows)
+        print(f"Status CSV updated: {csv_path}  "
+              f"({len(new_rows)} new record(s), "
+              f"{len(existing_folders)} existing)")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -300,6 +391,7 @@ def main():
 
     if not candidates:
         print("No folders require embedding.")
+        update_status_csv(processed_root)
         sys.exit(0)
 
     print(f"\nFolders to embed: {len(candidates)}")
@@ -318,6 +410,7 @@ def main():
         print()
 
     print(f"Done: {done} embedded, {errors} error(s).")
+    update_status_csv(processed_root)
     sys.exit(1 if errors else 0)
 
 
